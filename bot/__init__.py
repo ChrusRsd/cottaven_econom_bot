@@ -1,0 +1,1 @@
+"""Montana economy bot package."""

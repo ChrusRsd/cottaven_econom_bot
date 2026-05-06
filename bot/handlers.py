@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from collections import OrderedDict
 from typing import Any
 
 from aiogram import F, Router
+from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, ErrorEvent, Message
@@ -171,6 +173,18 @@ SUPER_TYPES = {"megacorp", "conglomerate"}
 def build_router(services: EconomyService) -> Router:
     router = Router(name="montana-handlers")
     pending_sticker_ids: set[int] = set()
+    recent_message_authors: OrderedDict[tuple[int, int], Any] = OrderedDict()
+
+    class ReplyAuthorCacheMiddleware(BaseMiddleware):
+        async def __call__(self, handler, event: Message, data):
+            if isinstance(event, Message) and event.from_user is not None:
+                recent_message_authors[(event.chat.id, event.message_id)] = event.from_user
+                recent_message_authors.move_to_end((event.chat.id, event.message_id))
+                while len(recent_message_authors) > 2000:
+                    recent_message_authors.popitem(last=False)
+            return await handler(event, data)
+
+    router.message.outer_middleware(ReplyAuthorCacheMiddleware())
 
     async def actor_from_message(message: Message) -> dict:
         if message.from_user is None:
@@ -181,6 +195,13 @@ def build_router(services: EconomyService) -> Router:
         if callback.from_user is None:
             raise ServiceError("Не удалось определить отправителя нажатия.")
         return await services.ensure_user(callback.from_user)
+
+    def cached_reply_user(message_like):
+        chat = getattr(message_like, "chat", None)
+        message_id = getattr(message_like, "message_id", None)
+        if chat is None or message_id is None:
+            return None
+        return recent_message_authors.get((int(chat.id), int(message_id)))
 
     def reply_user(message: Message):
         def usable(candidate):
@@ -201,12 +222,19 @@ def build_router(services: EconomyService) -> Router:
             if usable(reply_sender_user):
                 return reply_sender_user
 
+            cached_user = cached_reply_user(reply_message)
+            if usable(cached_user):
+                return cached_user
+
         external_reply = getattr(message, "external_reply", None)
         if external_reply is not None:
             origin = getattr(external_reply, "origin", None)
             sender_user = getattr(origin, "sender_user", None)
             if usable(sender_user):
                 return sender_user
+            cached_user = cached_reply_user(external_reply)
+            if usable(cached_user):
+                return cached_user
         return None
 
     def has_reply_context(message: Message) -> bool:

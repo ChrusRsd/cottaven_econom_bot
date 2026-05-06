@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, ErrorEvent, Message
 
@@ -213,6 +213,15 @@ def build_router(services: EconomyService) -> Router:
         return (
             getattr(message, "reply_to_message", None) is not None
             or getattr(message, "external_reply", None) is not None
+            or getattr(message, "quote", None) is not None
+            or getattr(message, "reply_to_story", None) is not None
+        )
+
+    def reply_target_unavailable_error() -> ServiceError:
+        return ServiceError(
+            "Бот не смог определить автора reply. В группах это обычно происходит, "
+            "когда у бота включён Privacy Mode в BotFather. "
+            "Отключите Privacy Mode или используйте @username / ID."
         )
 
     def is_reference_token(token: str) -> bool:
@@ -265,7 +274,7 @@ def build_router(services: EconomyService) -> Router:
         replied_user = reply_user(message)
         if replied_user is None:
             if has_reply_context(message):
-                raise ServiceError("Не удалось определить пользователя в reply. Используйте reply на обычное сообщение игрока, @username или ID.")
+                raise reply_target_unavailable_error()
             raise ServiceError(f"Данные заполнены неправильно.\nПример: {example}")
         return await services.resolve_reference(reply_user=replied_user)
 
@@ -326,7 +335,7 @@ def build_router(services: EconomyService) -> Router:
             return await actor_from_message(message), amount, currency
 
         if has_reply_context(message):
-            raise ServiceError("Не удалось определить пользователя в reply. Используйте reply на обычное сообщение игрока, @username или ID.")
+            raise reply_target_unavailable_error()
         raise ServiceError(f"Данные заполнены неправильно.\nПример: {example}")
 
     async def parse_target_amount_reason(
@@ -366,7 +375,7 @@ def build_router(services: EconomyService) -> Router:
             reason = " ".join(args[1:]).strip()
         else:
             if has_reply_context(message):
-                raise ServiceError("Не удалось определить пользователя в reply. Используйте reply на обычное сообщение игрока, @username или ID.")
+                raise reply_target_unavailable_error()
             raise ServiceError(f"Данные заполнены неправильно.\nПример: {example}")
 
         if not reason:
@@ -408,7 +417,7 @@ def build_router(services: EconomyService) -> Router:
             payload = args[1:]
         else:
             if has_reply_context(message):
-                raise ServiceError("Не удалось определить пользователя в reply. Используйте reply на обычное сообщение игрока, @username или ID.")
+                raise reply_target_unavailable_error()
             raise ServiceError(f"Данные заполнены неправильно.\nПример: {example}")
 
         currency = "usd"
@@ -455,7 +464,7 @@ def build_router(services: EconomyService) -> Router:
             return target, item_name, quantity
 
         if has_reply_context(message):
-            raise ServiceError("Не удалось определить пользователя в reply. Используйте reply на обычное сообщение игрока, @username или ID.")
+            raise reply_target_unavailable_error()
         raise ServiceError(f"Данные заполнены неправильно.\nПример: {example}")
 
     async def parse_target_and_text(
@@ -495,7 +504,7 @@ def build_router(services: EconomyService) -> Router:
                 return maybe_target, text
 
         if has_reply_context(message):
-            raise ServiceError("Не удалось определить пользователя в reply. Используйте reply на обычное сообщение игрока, @username или ID.")
+            raise reply_target_unavailable_error()
         raise ServiceError(f"Данные заполнены неправильно.\nПример: {example}")
 
     def payload_after_command(message: Message) -> str:
@@ -783,12 +792,20 @@ def build_router(services: EconomyService) -> Router:
     @router.error()
     async def on_error(event: ErrorEvent) -> None:
         exc = event.exception
+        if isinstance(exc, TelegramRetryAfter):
+            return
         text = str(exc) if isinstance(exc, (ServiceError, ValueError)) else "Что-то пошло не так. Попробуйте ещё раз."
         if event.update.message:
-            await event.update.message.answer(text)
+            try:
+                await event.update.message.answer(text)
+            except (TelegramRetryAfter, TelegramAPIError):
+                return
             return
         if event.update.callback_query:
-            await event.update.callback_query.answer(text, show_alert=True)
+            try:
+                await event.update.callback_query.answer(text, show_alert=True)
+            except (TelegramRetryAfter, TelegramAPIError):
+                return
 
     @router.message(CommandStart())
     async def start_handler(message: Message) -> None:

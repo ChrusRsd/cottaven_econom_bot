@@ -177,7 +177,7 @@ def build_router(services: EconomyService) -> Router:
 
     class ReplyAuthorCacheMiddleware(BaseMiddleware):
         async def __call__(self, handler, event, data):
-            message = getattr(event, "message", None)
+            message = event if isinstance(event, Message) else getattr(event, "message", None)
             if isinstance(message, Message) and message.from_user is not None:
                 recent_message_authors[(message.chat.id, message.message_id)] = message.from_user
                 recent_message_authors.move_to_end((message.chat.id, message.message_id))
@@ -185,7 +185,7 @@ def build_router(services: EconomyService) -> Router:
                     recent_message_authors.popitem(last=False)
             return await handler(event, data)
 
-    router.update.outer_middleware(ReplyAuthorCacheMiddleware())
+    router.message.outer_middleware(ReplyAuthorCacheMiddleware())
 
     async def actor_from_message(message: Message) -> dict:
         if message.from_user is None:
